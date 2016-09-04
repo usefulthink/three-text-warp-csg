@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>THREE.js text-warp and CSG</title>
+  <style>
+    body {
+      margin: 0;
+      overflow hidden;
+    }
+
+    canvas {
+      width: 100vw;
+      height: 100vh;
+    }
+  </style>
+</head>
+
+<body translate="no">
+<script src='https://cdn.rawgit.com/mrdoob/three.js/master/build/three.js'></script>
+<script src='https://cdn.rawgit.com/chandlerprall/ThreeCSG/master/ThreeCSG.js'></script>
+<script src='https://cdn.rawgit.com/mrdoob/three.js/master/examples/js/controls/OrbitControls.js'></script>
+<script src='./base.js'></script>
+<script>
+  const fontLoader = new THREE.FontLoader();
+  const FONT_URL = 'https://cdn.rawgit.com/mrdoob/three.js/dev/examples/fonts/helvetiker_regular.typeface.json';
+  const fontLoaded = new Promise(resolve => {
+    fontLoader.load(FONT_URL, resolve);
+  });
+
+  class Demo extends Base {
+    constructor() {
+      super();
+      const baseRadius = 5;
+
+      fontLoaded
+          .then(font => {
+            const textGeometry = createWarpedTextGeometry(
+                'warped text!', font, baseRadius);
+            const cylinderGeometry = new THREE.CylinderGeometry(
+                baseRadius * 1.01, baseRadius * 1.01, 4, 36);
+
+            const textMesh = new THREE.Mesh(
+                textGeometry,
+                new THREE.MeshStandardMaterial({
+                  color: 0xff0000,
+                  roughness: 0.3,
+                  metalness: 0.25
+                })
+            );
+
+            const cylinderMesh = new THREE.Mesh(
+                cylinderGeometry,
+                new THREE.MeshStandardMaterial({
+                  color: 0xffffff,
+                  roughness: 0.3,
+                  metalness: 0.25
+                })
+            );
+
+            textMesh.position.y = -0.4;
+
+            this.scene.add(textMesh, cylinderMesh);
+
+            return makeCsgGeometry(cylinderGeometry, textGeometry);
+          })
+
+          .then(geometry => {
+            const resultMesh = new THREE.Mesh(
+                geometry,
+                new THREE.MeshStandardMaterial({
+                  color: 0x00ffff,
+                  roughness: 0.3,
+                  metalness: 0.25
+                })
+            );
+
+            resultMesh.position.y = 4;
+            this.scene.add(resultMesh);
+          });
+    }
+  }
+
+  function createWarpedTextGeometry(text, font, radius) {
+    const textGeometry = new THREE.TextGeometry(
+        text, {
+          font,
+          size: 1,
+          height: 0.1,
+          bevelEnabled: false,
+          bevelThickness: 0.01,
+          bevelSize: 0.01
+        });
+
+    textGeometry.vertices.forEach(v => {
+      const r = radius + v.z;
+      const alpha = v.x / radius;
+
+      v.x = r * Math.sin(alpha);
+      v.z = r * Math.cos(alpha);
+    });
+
+    return textGeometry;
+  }
+
+  function makeCsgGeometry(cylinderGeometry, textGeometry) {
+    const scripts = [
+      'https://cdn.rawgit.com/mrdoob/three.js/master/build/three.js',
+      'https://cdn.rawgit.com/chandlerprall/ThreeCSG/master/ThreeCSG.js'
+    ];
+
+    return createWorker(scripts, function worker(geometries, callback) {
+
+      // !!! this function is executed in the worker-thread
+      console.log('worker started');
+      const loader = new THREE.ObjectLoader();
+
+      geometries = loader.parseGeometries(geometries);
+
+      let textGeometry, cylinderGeometry;
+      Object.keys(geometries).forEach(uuid => {
+        const geometry = geometries[uuid];
+        if (geometry.type === 'CylinderGeometry') {
+          cylinderGeometry = geometry;
+        } else {
+          textGeometry = geometry;
+        }
+      });
+
+      console.log('start CSG processing');
+      console.time('csg-processing');
+      const textBSP = new ThreeBSP(textGeometry);
+      const cylinderBSP = new ThreeBSP(cylinderGeometry);
+      const resultGeometry = cylinderBSP.subtract(textBSP).toGeometry();
+      console.log('CSG processing done');
+      console.timeEnd('csg-processing');
+
+      callback(resultGeometry.toJSON());
+      // end of code running in worker-thread
+
+    }).then(worker => {
+      // textGeometry is for some reason not supported by ObjectLoader,
+      // but works when disguised as regular geometry.
+      const textData = textGeometry.toJSON();
+      textData.type = 'Geometry';
+      worker.postMessage([cylinderGeometry.toJSON(), textData]);
+
+      return new Promise(resolve => {
+        worker.onmessage = ev => {
+          worker.terminate();
+
+          const loader = new THREE.JSONLoader();
+          resolve(loader.parse(ev.data.data).geometry);
+        }
+      });
+    });
+  }
+
+
+  function createWorker(scripts, onMessage) {
+    return Promise.all(scripts.map(url => fetch(url)))
+        .then(responses => Promise.all(responses.map(r => r.text())))
+        .then(sources => {
+          const libs = sources.map(
+              src => `new Function('window', ${JSON.stringify(src)}).call(self, self);`);
+          // const libs = [];
+
+          const code = `
+            ${libs.join('\n')}
+
+            const onMessage = ${onMessage.toString()};
+
+            self.onmessage = function(ev) {
+              onMessage(ev.data, result => {
+                self.postMessage(result);
+              });
+            };
+          `;
+
+          const blob = new Blob([code]);
+          return URL.createObjectURL(blob);
+        })
+
+        .then(url => {
+          return new Worker(url)
+        });
+  }
+
+
+  const demo = new Demo();
+  requestAnimationFrame(function loop(time) {
+    demo.update(time);
+    demo.render();
+
+    requestAnimationFrame(loop);
+  });
+</script>
+
+
+</body>
+</html>
+ 
